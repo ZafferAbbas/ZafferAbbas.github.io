@@ -1,0 +1,20 @@
+body{
+    background:#0D0D2B;
+}
+#signUpButton{
+    
+}
+#logInButton{
+    position: relative;
+}
+#logInButton::after{
+    content: '';
+    width: 1px;
+    height: 20px;
+    background: #F2F2F2;
+    position: absolute;
+    top: 2px;
+    right: -1px;
+    bottom: 0;
+    margin: auto;
+}
