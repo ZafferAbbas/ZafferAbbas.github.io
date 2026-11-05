@@ -1,0 +1,40 @@
+{
+  "name": "whatsapp-assistant-bot",
+  "version": "0.1.0",
+  "description": "AI assistant for a WhatsApp Business number: stores notes and sends reminders, in DMs and groups.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/index.ts",
+    "build": "tsc",
+    "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZafferAbbas/ZafferAbbas.github.io.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ZafferAbbas/ZafferAbbas.github.io/issues"
+  },
+  "homepage": "https://github.com/ZafferAbbas/ZafferAbbas.github.io#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.5.0",
+    "baileys": "^7.0.0-rc14",
+    "pino": "^10.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "UNLICENSED"
+}
