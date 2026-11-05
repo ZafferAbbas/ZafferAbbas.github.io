@@ -1,8 +1,8 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { pino } from "pino";
-import { respond } from "./agent.js";
+import { createBackend, respond } from "./agent.js";
 import { config } from "./config.js";
 import { Store } from "./db.js";
+import { TransientLlmError } from "./llm/types.js";
 import { startScheduler } from "./scheduler.js";
 import { BaileysTransport } from "./transports/baileys.js";
 import { CloudTransport } from "./transports/cloud.js";
@@ -10,6 +10,7 @@ import type { IncomingMessage, Transport } from "./transports/types.js";
 
 const log = pino({ level: process.env.LOG_LEVEL ?? "info" });
 const store = new Store(config.dataDir);
+const backend = await createBackend();
 
 const transport: Transport =
   config.transport === "cloud"
@@ -48,11 +49,11 @@ async function handle(msg: IncomingMessage): Promise<void> {
   const typing = transport instanceof BaileysTransport ? transport : undefined;
   await typing?.setTyping(msg.chatId, true);
   try {
-    const reply = await respond(msg, store);
+    const reply = await respond(backend, msg, store);
     await transport.send(msg.chatId, reply);
   } catch (err) {
     log.error({ err, chat: msg.chatId }, "failed to respond");
-    const busy = err instanceof Anthropic.RateLimitError || (err instanceof Anthropic.APIError && (err.status ?? 0) >= 500);
+    const busy = err instanceof TransientLlmError;
     await transport
       .send(msg.chatId, busy ? "I'm a bit overloaded right now, please try again in a minute." : "Sorry, something went wrong on my side.")
       .catch(() => {});
@@ -71,4 +72,4 @@ await transport.start((msg) => {
 
 startScheduler(store, transport, log);
 setInterval(() => store.pruneHistory(config.historyTurns * 2), 3600_000).unref();
-log.info({ transport: transport.name, timezone: config.timezone, model: config.model }, `${config.botName} is running`);
+log.info({ transport: transport.name, llm: backend.name, timezone: config.timezone }, `${config.botName} is running`);

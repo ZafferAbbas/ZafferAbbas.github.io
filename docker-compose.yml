@@ -1,0 +1,44 @@
+# Runs the bot and a local Ollama model server on one VPS. No API keys or per-message costs.
+#   cp .env.example .env        (set TIMEZONE, BOT_NAME, OLLAMA_MODEL)
+#   docker compose up -d
+#   docker compose logs -f bot  (scan the QR code)
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      retries: 30
+
+  # Downloads the model once (a few GB), then exits.
+  ollama-pull:
+    image: ollama/ollama:latest
+    env_file: .env
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["sh", "-c", "ollama pull \"$${OLLAMA_MODEL:-qwen3:4b}\""]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LLM_PROVIDER: ollama
+      OLLAMA_URL: http://ollama:11434
+    volumes:
+      - data:/data
+    ports:
+      - "3000:3000" # only used by the Cloud API transport
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+
+volumes:
+  ollama:
+  data:
