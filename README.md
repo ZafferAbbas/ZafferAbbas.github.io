@@ -48,7 +48,7 @@ WhatsApp ──► transport (Baileys or Cloud API) ──► per-chat queue ─
 | 16 GB | `qwen3:8b` | ~5 GB | ~15–40 s; most reliable |
 
 Tips:
-- Free VPS option: Oracle Cloud's Always Free tier includes ARM servers with up to 24 GB RAM, which can run `qwen3:8b`. Ollama supports ARM.
+- Free VPS option: Oracle Cloud's Always Free tier includes an ARM server, cut in mid-2026 from 24 GB to 12 GB RAM and 2 CPU cores. That still fits `qwen3:8b`, but replies will be slow. Ollama supports ARM.
 - `OLLAMA_THINK=true` turns on the model's step-by-step reasoning. It's smarter at working out dates, but several times slower on a CPU.
 - To make the bot easier for a small model, `create_reminder` accepts "in N minutes" directly, and each message shows the current local date, weekday and time.
 
