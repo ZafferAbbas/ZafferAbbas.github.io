@@ -30,7 +30,10 @@ Rules:
 - This is WhatsApp: keep replies short. Use only WhatsApp formatting (*bold*, _italic_, "- " lists). No markdown headings or tables.
 - You can answer simple questions briefly, but you have no internet access.`;
 
-export function buildTools(msg: IncomingMessage, store: Store): ToolSpec[] {
+/** Returns a warning if a reminder for this chat at `dueAt` might not be deliverable, else null. */
+export type ReminderWarning = (chatId: string, dueAt: number) => string | null;
+
+export function buildTools(msg: IncomingMessage, store: Store, reminderWarning?: ReminderWarning): ToolSpec[] {
   const tz = config.timezone;
   return [
     tool({
@@ -120,7 +123,14 @@ export function buildTools(msg: IncomingMessage, store: Store): ToolSpec[] {
           due_at: first,
           recurrence: recurrence ?? null,
         });
-        return JSON.stringify({ created: true, id: r.id, fires_at: formatTime(first, tz), recurrence: recurrence ?? "once" });
+        const warning = reminderWarning?.(msg.chatId, first);
+        return JSON.stringify({
+          created: true,
+          id: r.id,
+          fires_at: formatTime(first, tz),
+          recurrence: recurrence ?? "once",
+          ...(warning ? { warning } : {}),
+        });
       },
     }),
     tool({

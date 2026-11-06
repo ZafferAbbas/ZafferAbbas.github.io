@@ -1,7 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage as HttpRequest } from "node:http";
 import type { Logger } from "pino";
-import type { IncomingMessage, OutgoingOptions, Transport } from "./types.js";
+import type { Store } from "../db.js";
+import { UndeliverableError, type IncomingMessage, type OutgoingOptions, type Transport } from "./types.js";
+
+/** Meta only allows free-form messages within 24h of the user's last message. Keep a small safety margin. */
+const WINDOW_MS = 24 * 3600_000 - 10 * 60_000;
+/** Graph API error code for "outside the 24-hour window, use a template". */
+const RE_ENGAGEMENT_ERROR = 131047;
 
 export interface CloudOptions {
   port: number;
@@ -12,7 +18,10 @@ export interface CloudOptions {
   graphVersion: string;
   reminderTemplate: string;
   reminderTemplateLang: string;
+  store: Store;
   log: Logger;
+  /** Graph API base URL. Only changed in tests. */
+  graphBaseUrl?: string;
 }
 
 interface WebhookBody {
@@ -41,13 +50,15 @@ interface WebhookBody {
  */
 export class CloudTransport implements Transport {
   readonly name = "cloud";
-  private lastInbound = new Map<string, number>();
 
   constructor(private opts: CloudOptions) {
     for (const k of ["verifyToken", "accessToken", "phoneNumberId"] as const) {
       if (!opts[k]) throw new Error(`Cloud API transport needs ${k} (see .env.example)`);
     }
     if (!opts.appSecret) opts.log.warn("WA_APP_SECRET not set: webhook signatures will not be verified");
+    if (!opts.reminderTemplate) {
+      opts.log.warn("WA_REMINDER_TEMPLATE not set: reminders due more than 24h after someone's last message can't be delivered");
+    }
   }
 
   async start(onMessage: (msg: IncomingMessage) => void): Promise<void> {
@@ -82,7 +93,7 @@ export class CloudTransport implements Transport {
           for (const m of v?.messages ?? []) {
             const text = m.text?.body ?? m.image?.caption ?? "";
             if (!text.trim()) continue;
-            this.lastInbound.set(m.from, Date.now());
+            this.opts.store.touchInbound(m.from, Number(m.timestamp) * 1000 || Date.now());
             const name = v?.contacts?.find((c) => c.wa_id === m.from)?.profile?.name ?? m.from;
             onMessage({
               chatId: m.from,
@@ -112,31 +123,75 @@ export class CloudTransport implements Transport {
     return "";
   }
 
+  private windowOpenAt(chatId: string, at: number): boolean {
+    const last = this.opts.store.lastInbound(chatId);
+    return last !== null && at - last < WINDOW_MS;
+  }
+
+  reminderWarning(chatId: string, dueAt: number): string | null {
+    if (this.opts.reminderTemplate || this.windowOpenAt(chatId, dueAt)) return null;
+    return "WhatsApp only lets this bot message someone within 24 hours of their last message, and this reminder is due after that. Tell the user it will only arrive if they message you again during the 24 hours before it is due.";
+  }
+
   async send(chatId: string, text: string, opts?: OutgoingOptions): Promise<void> {
-    const windowOpen = Date.now() - (this.lastInbound.get(chatId) ?? 0) < 23.5 * 3600_000;
-    if (opts?.isReminder && !windowOpen && this.opts.reminderTemplate) {
-      await this.post({
-        messaging_product: "whatsapp",
-        to: chatId,
-        type: "template",
-        template: {
-          name: this.opts.reminderTemplate,
-          language: { code: this.opts.reminderTemplateLang },
-          components: [{ type: "body", parameters: [{ type: "text", text: text.slice(0, 1000) }] }],
-        },
-      });
-      return;
+    const reminderText = opts?.reminderText;
+    if (reminderText !== undefined && !this.windowOpenAt(chatId, Date.now())) {
+      return this.sendReminderTemplate(chatId, reminderText);
     }
-    await this.post({ messaging_product: "whatsapp", to: chatId, type: "text", text: { body: text, preview_url: false } });
+    try {
+      await this.post({ messaging_product: "whatsapp", to: chatId, type: "text", text: { body: text, preview_url: false } });
+    } catch (err) {
+      // Our record of the window can be off (e.g. messages sent before this bot was set up); Meta's answer wins.
+      if (reminderText !== undefined && err instanceof GraphError && err.code === RE_ENGAGEMENT_ERROR) {
+        return this.sendReminderTemplate(chatId, reminderText);
+      }
+      throw err;
+    }
+  }
+
+  private async sendReminderTemplate(chatId: string, reminderText: string): Promise<void> {
+    if (!this.opts.reminderTemplate) {
+      throw new UndeliverableError("24-hour window closed and WA_REMINDER_TEMPLATE is not set");
+    }
+    // Template variables may not contain newlines, tabs or more than 4 spaces in a row.
+    const param = reminderText.replace(/\s+/g, " ").trim().slice(0, 1000) || "Reminder";
+    await this.post({
+      messaging_product: "whatsapp",
+      to: chatId,
+      type: "template",
+      template: {
+        name: this.opts.reminderTemplate,
+        language: { code: this.opts.reminderTemplateLang },
+        components: [{ type: "body", parameters: [{ type: "text", text: param }] }],
+      },
+    });
   }
 
   private async post(payload: unknown): Promise<void> {
-    const res = await fetch(`https://graph.facebook.com/${this.opts.graphVersion}/${this.opts.phoneNumberId}/messages`, {
+    const res = await fetch(`${this.opts.graphBaseUrl ?? "https://graph.facebook.com"}/${this.opts.graphVersion}/${this.opts.phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.opts.accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`Cloud API send failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      let code: number | undefined;
+      try {
+        code = JSON.parse(body)?.error?.code;
+      } catch {
+        // not JSON
+      }
+      throw new GraphError(`Cloud API send failed: ${res.status} ${body}`, code);
+    }
+  }
+}
+
+class GraphError extends Error {
+  constructor(
+    message: string,
+    readonly code?: number,
+  ) {
+    super(message);
   }
 }
 

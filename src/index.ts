@@ -14,7 +14,7 @@ const backend = await createBackend();
 
 const transport: Transport =
   config.transport === "cloud"
-    ? new CloudTransport({ ...config.cloud, log })
+    ? new CloudTransport({ ...config.cloud, store, log })
     : new BaileysTransport({
         authDir: config.baileys.authDir,
         pairingNumber: config.baileys.pairingNumber || undefined,
@@ -49,7 +49,7 @@ async function handle(msg: IncomingMessage): Promise<void> {
   const typing = transport instanceof BaileysTransport ? transport : undefined;
   await typing?.setTyping(msg.chatId, true);
   try {
-    const reply = await respond(backend, msg, store);
+    const reply = await respond(backend, msg, store, transport.reminderWarning?.bind(transport));
     await transport.send(msg.chatId, reply);
   } catch (err) {
     log.error({ err, chat: msg.chatId }, "failed to respond");

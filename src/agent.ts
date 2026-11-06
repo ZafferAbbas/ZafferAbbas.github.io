@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import type { Store } from "./db.js";
 import type { LlmBackend } from "./llm/types.js";
-import { buildTools, SYSTEM_PROMPT } from "./tools.js";
+import { buildTools, SYSTEM_PROMPT, type ReminderWarning } from "./tools.js";
 import type { IncomingMessage } from "./transports/types.js";
 
 export async function createBackend(): Promise<LlmBackend> {
@@ -35,12 +35,17 @@ function userTurnText(msg: IncomingMessage): string {
 }
 
 /** Runs one turn for an incoming message and returns the reply text. */
-export async function respond(backend: LlmBackend, msg: IncomingMessage, store: Store): Promise<string> {
+export async function respond(
+  backend: LlmBackend,
+  msg: IncomingMessage,
+  store: Store,
+  reminderWarning?: ReminderWarning,
+): Promise<string> {
   const history = store.recentHistory(msg.chatId, config.historyTurns * 2);
   while (history.length && history[0].role !== "user") history.shift();
 
   const userText = userTurnText(msg);
-  const reply = (await backend.run(SYSTEM_PROMPT, history, userText, buildTools(msg, store))) || "Done.";
+  const reply = (await backend.run(SYSTEM_PROMPT, history, userText, buildTools(msg, store, reminderWarning))) || "Done.";
 
   // Only plain text is stored, so history replays cleanly on any backend.
   store.addHistory(msg.chatId, "user", userText);
