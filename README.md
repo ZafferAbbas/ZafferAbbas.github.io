@@ -1,23 +1,23 @@
 # WhatsApp Assistant Bot
 
-An AI assistant for a WhatsApp Business number. People can message it directly or add it to groups. It **stores** things (notes, lists, numbers, decisions) and **notifies** people (one-off and recurring reminders), using an AI model to understand plain-language requests.
+An AI assistant for a WhatsApp Business number, using Meta's official WhatsApp Business Cloud API. People message it directly. It **stores** things (notes, lists, numbers, decisions) and **notifies** people (one-off and recurring reminders), using an AI model to understand plain-language requests.
 
 By default the AI is a **free, open model you run yourself** (through [Ollama](https://ollama.com)) on the same VPS, so there are no API keys and no per-message costs. Claude is available as an optional paid backend.
 
 ```
-You:  @Assistant remember the office wifi is "Zeta-5G", password hunter2
+You:  remember the office wifi is "Zeta-5G", password hunter2
 Bot:  Saved ✅
-You:  @Assistant remind us every weekday at 9:30 to post standup updates
-Bot:  Done. I'll post "Post your standup updates" here Mon–Fri at 09:30 (PKT). First one: Thu 5 Nov.
+You:  remind me every weekday at 9:30 to post standup updates
+Bot:  Done. I'll remind you Mon–Fri at 09:30 (PKT). First one: Fri 6 Nov.
 ...
-Bot:  ⏰ *Reminder* for @Zaffer
+Bot:  ⏰ *Reminder*
       Post your standup updates
 ```
 
 ## How it works
 
 ```
-WhatsApp ──► transport (Baileys or Cloud API) ──► per-chat queue ──► AI model + tools ──► reply
+WhatsApp ──► Cloud API webhook ──► per-chat queue ──► AI model + tools ──► reply
                                                                          │
                                          SQLite: notes, reminders, chat history
                                                                          │
@@ -26,17 +26,16 @@ WhatsApp ──► transport (Baileys or Cloud API) ──► per-chat queue ─
 
 - **The AI model** (local Ollama model by default, or Claude) gets a small set of tools: `save_note`, `search_notes`, `delete_note`, `create_reminder`, `list_reminders`, `cancel_reminder`. The model decides which to call; the bot runs them and the model writes the reply.
 - **Storage** is a single SQLite file (`data/assistant.db`), using Node's built-in `node:sqlite`, so there is nothing to install.
-- **Scoping:** notes and reminders belong to the chat they were made in. A group shares its notes; a direct chat's notes are private to that person.
-- **Groups:** the bot only responds when it's @mentioned, when someone replies to one of its messages, or when a message starts with its name (or a `GROUP_TRIGGERS` word). It ignores everything else, and it doesn't store messages that aren't addressed to it.
-- **Direct messages:** it responds to everything (restrict who can DM it with `ALLOWED_NUMBERS`).
-- **Reminders** fire in the chat they were set in and tag the person who set them. Recurring reminders keep their local wall-clock time across daylight-saving changes. If the bot was offline, missed reminders are sent late with a note.
+- **Scoping:** each person's notes and reminders are private to their own chat.
+- **Who can use it:** anyone who messages the number, unless you restrict it with `ALLOWED_NUMBERS`.
+- **Reminders** are sent back to the person who set them. See [The 24-hour rule](#the-24-hour-rule) for what that needs. Recurring reminders keep their local wall-clock time across daylight-saving changes. If the bot was offline, missed reminders are sent late with a note.
 - Send `/reset` in a chat to clear the bot's conversation context (saved notes and reminders are kept).
 
 ## Choosing the AI model
 
 | `LLM_PROVIDER` | Cost | Quality | Needs |
 |---|---|---|---|
-| `ollama` (default) | Free software; you only pay for the VPS | Good for notes and simple reminders; can misread tricky times or long group conversations | A VPS with enough RAM (below) |
+| `ollama` (default) | Free software; you only pay for the VPS | Good for notes and simple reminders; can misread tricky times or long conversations | A VPS with enough RAM (below) |
 | `claude` | Paid per message | Best at understanding messy requests | `ANTHROPIC_API_KEY` |
 
 **Which local model?** Pick one that fits your VPS's RAM, set it as `OLLAMA_MODEL`. All three support tool calling, which the bot needs. Speeds are rough estimates for a CPU-only VPS, not measured with this bot:
@@ -52,65 +51,66 @@ Tips:
 - `OLLAMA_THINK=true` turns on the model's step-by-step reasoning. It's smarter at working out dates, but several times slower on a CPU.
 - To make the bot easier for a small model, `create_reminder` accepts "in N minutes" directly, and each message shows the current local date, weekday and time.
 
-## Choosing a WhatsApp transport
+## The 24-hour rule
 
-| | `baileys` (default) | `cloud` |
-|---|---|---|
-| What it is | Links to your existing WhatsApp / WhatsApp Business **app** account as a linked device (like WhatsApp Web) | Meta's official **WhatsApp Business Cloud API** |
-| Can be added to groups | ✅ Yes, like any member | ❌ No (Cloud API numbers can't join normal groups) |
-| Direct messages | ✅ | ✅ |
-| Reminders any time | ✅ | Only within 24h of the user's last message, unless you set an approved template (`WA_REMINDER_TEMPLATE`) |
-| Setup | Scan a QR code | Meta developer app, webhook, public HTTPS URL |
-| Risk | Unofficial; against WhatsApp's terms, so the number **can be banned**. Use a number you can afford to lose and don't send bulk or unsolicited messages | Officially supported; per-conversation pricing from Meta |
+WhatsApp only lets a business send free-form messages to someone within **24 hours of their last message**. After that, it may only send pre-approved **template** messages.
 
-Since you want the bot in groups, `baileys` is the default. If you'd rather stay fully official, use `cloud` and accept DMs only.
+- A reminder due within 24 hours of the person's last message is sent as a normal message.
+- A reminder due later is sent through your reminder template (`WA_REMINDER_TEMPLATE`), for example "Reminder: {{1}}". Without a template, those reminders can't be delivered: the bot warns the person when they set one, and skips it when it's due.
+- The bot keeps track of each person's last message in its database, so this works across restarts.
+
+## Costs
+
+Prices are set by Meta and change; check [Meta's pricing page](https://developers.facebook.com/docs/whatsapp/pricing) for your country. As of late 2026:
+
+- **Replies to someone who messaged in the last 24 hours:** the first 1,000 per month per number are free, then charged.
+- **Template messages** (reminders outside the 24-hour window): charged per message, roughly $0.003 each in the US; it varies by country.
+
+## Groups
+
+The official API can't join ordinary WhatsApp groups. Meta's Groups API exists, but only for verified Official Business Accounts, the business must create the group itself, people join by invite link, and groups are limited to 8 members. This bot doesn't use it.
+
+If you need groups, the bot also has an unofficial linked-device mode (`WA_TRANSPORT=baileys`) that joins groups like a normal member by scanning a QR code. It's against WhatsApp's terms, so the number can be banned. See [`.env.example`](.env.example).
 
 ## Setup
 
-The easiest way is Docker Compose, which runs the bot and Ollama together (see [Running in production](#running-in-production)). To run it directly instead, you need Node.js 22.13+ and [Ollama](https://ollama.com/download):
+You need a VPS with Docker, a domain or subdomain (for HTTPS), and a phone number for the bot.
 
-```bash
-ollama pull qwen3:4b
-npm install
-cp .env.example .env        # then set TIMEZONE, BOT_NAME, OLLAMA_MODEL
-npm run dev                 # or: npm run build && npm start
-```
+### 1. Meta (WhatsApp Cloud API)
 
-To use Claude instead, set `LLM_PROVIDER=claude` and `ANTHROPIC_API_KEY` in `.env`.
+1. Go to [developers.facebook.com](https://developers.facebook.com/), create an app of type **Business**, and add the **WhatsApp** product.
+2. Under **WhatsApp → API Setup**, add your business phone number and verify it. A number used with the API normally can't stay in the WhatsApp Business app at the same time.
+3. Create a permanent access token: in [Meta Business Settings](https://business.facebook.com/settings) → **System users**, add a system user, assign it your app and WhatsApp account, and generate a token with `whatsapp_business_messaging` and `whatsapp_business_management` permissions. This is `WA_ACCESS_TOKEN`.
+4. Copy the **Phone number ID** (WhatsApp → API Setup) into `WA_PHONE_NUMBER_ID`, and the **App secret** (App settings → Basic) into `WA_APP_SECRET`.
+5. Create the reminder template under **WhatsApp Manager → Message templates**: category **Utility**, name `reminder`, body `Reminder: {{1}}`. Approval usually takes minutes to a day.
 
-### Baileys (groups + DMs)
+### 2. Server
 
-1. Keep the WhatsApp Business app installed on the phone that owns the number.
-2. Run the bot. A QR code appears in the terminal.
-3. On the phone: **WhatsApp Business → Settings → Linked devices → Link a device**, then scan it.
-   On a headless server, set `WA_PAIRING_NUMBER` to the bot's number instead: the bot prints an 8-character code to enter under **Link with phone number**.
-4. The session is saved in `data/baileys-auth/`, so you only link once. Keep that folder private: it's a login.
-5. Add the number to groups as usual.
+1. Point your domain (e.g. `bot.yourdomain.com`) at the VPS with a DNS **A record**.
+2. On the VPS, with [Docker](https://docs.docker.com/engine/install/) installed:
 
-### Cloud API (official, DMs only)
+   ```bash
+   git clone https://github.com/ZafferAbbas/ZafferAbbas.github.io.git wa-assistant
+   cd wa-assistant
+   cp .env.example .env    # fill in DOMAIN, the WA_* values, TIMEZONE, BOT_NAME, OLLAMA_MODEL
+   docker compose up -d    # first start downloads the model (a few GB)
+   docker compose logs -f bot
+   ```
 
-1. Create an app at [developers.facebook.com](https://developers.facebook.com/), add the **WhatsApp** product and register your business number.
-2. Set `WA_TRANSPORT=cloud`, plus `WA_ACCESS_TOKEN` (a permanent system-user token), `WA_PHONE_NUMBER_ID`, `WA_APP_SECRET` and any `WA_VERIFY_TOKEN` you choose.
-3. Deploy somewhere with a public HTTPS URL and set the webhook to `https://your-host/webhook` with the same verify token. Subscribe to the `messages` field.
-4. For reminders sent more than 24h after someone last wrote, create a utility template with one body variable (e.g. `Reminder: {{1}}`) and set `WA_REMINDER_TEMPLATE` to its name.
+   [`docker-compose.yml`](docker-compose.yml) starts Caddy (which gets a free HTTPS certificate for `DOMAIN`), Ollama, downloads `OLLAMA_MODEL` once, then starts the bot.
 
-## Running in production
+### 3. Connect the webhook
 
-On a Linux VPS with [Docker](https://docs.docker.com/engine/install/) installed:
+1. In your Meta app: **WhatsApp → Configuration → Webhook → Edit**.
+2. Callback URL: `https://bot.yourdomain.com/webhook`. Verify token: the `WA_VERIFY_TOKEN` from your `.env`.
+3. Click **Verify and save**, then under **Webhook fields** subscribe to **messages**.
+4. Send the number a WhatsApp message. The bot should answer.
 
-```bash
-git clone https://github.com/ZafferAbbas/ZafferAbbas.github.io.git wa-assistant
-cd wa-assistant
-cp .env.example .env          # set TIMEZONE, BOT_NAME, OLLAMA_MODEL
-docker compose up -d          # first start downloads the model (a few GB)
-docker compose logs -f bot    # scan the QR code on first run (baileys)
-```
+Using Claude instead of a local model? Set `LLM_PROVIDER=claude` and `ANTHROPIC_API_KEY` in `.env`; Ollama is then unused.
 
-[`docker-compose.yml`](docker-compose.yml) starts Ollama, downloads `OLLAMA_MODEL` once, then starts the bot. Using Claude instead? Run just the bot: `docker build -t wa-assistant . && docker run -d --env-file .env -v wa-data:/data -p 3000:3000 wa-assistant`.
+Run **one** instance only: the reminder scheduler assumes a single process. Back up the `data` volume; it holds every note and reminder.
 
-Run **one** instance only: the scheduler and the WhatsApp session both assume a single process. Back up the `data` volume; it holds every note, reminder and the WhatsApp login.
-
-This repository used to be a GitHub Pages site. If GitHub Pages is still enabled for it, turn it off under **Settings → Pages**; the bot is a Node.js service and needs a host such as a VPS, Railway, Fly.io or Render, not Pages.
+This repository used to be a GitHub Pages site. If GitHub Pages is still enabled for it, turn it off under **Settings → Pages**.
 
 ## Configuration
 
@@ -121,16 +121,20 @@ All settings are environment variables; see [`.env.example`](.env.example). The 
 | `LLM_PROVIDER` | `ollama` | `ollama` (free, self-hosted) or `claude` (paid) |
 | `OLLAMA_MODEL` | `qwen3:4b` | Local model; see the table above |
 | `ANTHROPIC_API_KEY` | | Only for `LLM_PROVIDER=claude` |
-| `BOT_NAME` | `Assistant` | Name the bot uses; starting a group message with it addresses the bot |
+| `BOT_NAME` | `Assistant` | Name the bot uses for itself |
 | `TIMEZONE` | system zone | IANA zone for reading and sending reminder times, e.g. `Asia/Karachi` |
-| `WA_TRANSPORT` | `baileys` | `baileys` or `cloud` |
-| `ALLOWED_NUMBERS` | (anyone) | Restrict who can DM the bot |
+| `DOMAIN` | | Domain for HTTPS; the webhook is `https://DOMAIN/webhook` |
+| `WA_REMINDER_TEMPLATE` | | Approved template for reminders outside the 24-hour window |
+| `WA_TRANSPORT` | `cloud` | `cloud` (official) or `baileys` (unofficial, supports groups) |
+| `ALLOWED_NUMBERS` | (anyone) | Restrict who can message the bot |
 
 ## Development
 
 ```bash
+npm install
 npm run typecheck
 npm test
+npm run dev     # needs .env and a running Ollama (ollama pull qwen3:4b)
 ```
 
 Code layout:
@@ -142,4 +146,4 @@ Code layout:
 - `src/db.ts`: SQLite store
 - `src/scheduler.ts`: sends due reminders
 - `src/time.ts`: time zones and recurrence
-- `src/transports/`: `baileys.ts`, `cloud.ts`
+- `src/transports/`: `cloud.ts` (official API), `baileys.ts` (unofficial)

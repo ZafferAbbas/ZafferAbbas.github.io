@@ -15,9 +15,12 @@ export interface IncomingMessage {
 export interface OutgoingOptions {
   /** User ids to @mention (groups). */
   mentions?: string[];
-  /** Set when this message is a scheduled reminder, so a transport can use a template if needed. */
-  isReminder?: boolean;
+  /** Set for scheduled reminders. Plain reminder text, used as the template variable when a template is needed. */
+  reminderText?: string;
 }
+
+/** A message that can never be delivered as things stand, so retrying is pointless. */
+export class UndeliverableError extends Error {}
 
 export interface Transport {
   readonly name: string;
@@ -25,4 +28,9 @@ export interface Transport {
   send(chatId: string, text: string, opts?: OutgoingOptions): Promise<void>;
   /** Text used to @mention a user inside a message body. */
   mentionTag(userId: string): string;
+  /**
+   * For reminders due at `dueAt`: a warning to give the user if the transport may not be able to deliver it,
+   * or null if it can.
+   */
+  reminderWarning?(chatId: string, dueAt: number): string | null;
 }

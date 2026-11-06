@@ -1,8 +1,21 @@
-# Runs the bot and a local Ollama model server on one VPS. No API keys or per-message costs.
-#   cp .env.example .env        (set TIMEZONE, BOT_NAME, OLLAMA_MODEL)
+# Runs the bot, a local Ollama model server and an HTTPS front end (Caddy) on one VPS.
+#   cp .env.example .env        (set DOMAIN, TIMEZONE, BOT_NAME, OLLAMA_MODEL and the WA_* values)
 #   docker compose up -d
-#   docker compose logs -f bot  (scan the QR code)
+#   docker compose logs -f bot
+# Point DOMAIN's DNS (an A record) at the VPS first: Caddy gets a free HTTPS certificate for it automatically.
 services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: ["caddy", "reverse-proxy", "--from", "${DOMAIN:?set DOMAIN in .env}", "--to", "bot:3000"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy:/data
+    depends_on:
+      - bot
+
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -31,14 +44,14 @@ services:
     environment:
       LLM_PROVIDER: ollama
       OLLAMA_URL: http://ollama:11434
+      PORT: "3000"
     volumes:
       - data:/data
-    ports:
-      - "3000:3000" # only used by the Cloud API transport
     depends_on:
       ollama-pull:
         condition: service_completed_successfully
 
 volumes:
+  caddy:
   ollama:
   data:

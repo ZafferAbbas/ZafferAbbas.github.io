@@ -5,7 +5,7 @@ function env(name: string, fallback?: string): string {
   throw new Error(`Missing required environment variable ${name}`);
 }
 
-const transport = env("WA_TRANSPORT", "baileys");
+const transport = env("WA_TRANSPORT", "cloud");
 if (transport !== "baileys" && transport !== "cloud") {
   throw new Error(`WA_TRANSPORT must be "baileys" or "cloud", got "${transport}"`);
 }

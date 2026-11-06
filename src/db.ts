@@ -68,6 +68,10 @@ export class Store {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS history_chat ON history(chat_id, id);
+      CREATE TABLE IF NOT EXISTS chat_activity (
+        chat_id TEXT PRIMARY KEY,
+        last_inbound_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -152,6 +156,22 @@ export class Store {
          )`,
       )
       .run(keepPerChat);
+  }
+
+  // ---- last message from each chat (for the Cloud API's 24-hour window) ----
+  touchInbound(chatId: string, at = Date.now()): void {
+    this.db
+      .prepare(
+        "INSERT INTO chat_activity (chat_id, last_inbound_at) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_inbound_at = max(last_inbound_at, excluded.last_inbound_at)",
+      )
+      .run(chatId, at);
+  }
+
+  lastInbound(chatId: string): number | null {
+    const row = this.db.prepare("SELECT last_inbound_at FROM chat_activity WHERE chat_id = ?").get(chatId) as
+      | { last_inbound_at: number }
+      | undefined;
+    return row ? Number(row.last_inbound_at) : null;
   }
 
   clearHistory(chatId: string): void {
