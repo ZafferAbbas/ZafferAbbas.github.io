@@ -1,3 +1,10 @@
+function numbers(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((s) => s.replace(/\D/g, ""))
+    .filter(Boolean);
+}
+
 function env(name: string, fallback?: string): string {
   const value = process.env[name];
   if (value !== undefined && value !== "") return value;
@@ -46,10 +53,39 @@ export const config = {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
   // Comma-separated phone numbers (digits only) allowed to DM the bot. Empty = everyone.
-  allowedNumbers: env("ALLOWED_NUMBERS", "")
-    .split(",")
-    .map((s) => s.replace(/\D/g, ""))
-    .filter(Boolean),
+  allowedNumbers: numbers("ALLOWED_NUMBERS"),
+  purchaseOrders: {
+    // Who may create purchase orders. Empty = anyone allowed to use the bot.
+    staffNumbers: numbers("STAFF_NUMBERS"),
+    // Who approves them. Purchase orders are disabled until at least one is set.
+    managerNumbers: numbers("MANAGER_NUMBERS"),
+    companyName: env("COMPANY_NAME", "Purchase Order"),
+    currency: env("CURRENCY", ""),
+    numberPrefix: env("PO_PREFIX", "PO-"),
+  },
+  odoo: {
+    url: (process.env.ODOO_URL ?? "").replace(/\/$/, ""),
+    database: process.env.ODOO_DB ?? "",
+    // "json2" for Odoo 19 and later, "jsonrpc" for Odoo 18 and earlier.
+    api: env("ODOO_API", "json2") as "json2" | "jsonrpc",
+    // Login (email) of the API user; only needed for jsonrpc.
+    login: process.env.ODOO_LOGIN ?? "",
+    apiKey: process.env.ODOO_API_KEY ?? "",
+    // Confirm the purchase order in Odoo once a manager approves it on WhatsApp.
+    confirm: env("ODOO_CONFIRM", "true") === "true",
+  },
+  customErp: {
+    // Approved purchase orders are POSTed here as JSON, signed with HMAC-SHA256.
+    url: process.env.CUSTOM_ERP_URL ?? "",
+    secret: process.env.CUSTOM_ERP_SECRET ?? "",
+  },
+  speechToText: {
+    // OpenAI-compatible transcription server (e.g. the speaches container in docker-compose.yml).
+    url: (process.env.STT_URL ?? "").replace(/\/$/, ""),
+    model: env("STT_MODEL", "Systran/faster-whisper-small"),
+    // Optional language hint, e.g. "en" or "ur". Empty = detect automatically.
+    language: process.env.STT_LANGUAGE ?? "",
+  },
   transport: transport as "baileys" | "cloud",
   baileys: {
     authDir: env("BAILEYS_AUTH_DIR", "./data/baileys-auth"),
@@ -64,6 +100,11 @@ export const config = {
     graphVersion: env("WA_GRAPH_VERSION", "v23.0"),
     // Approved template used for reminders when the 24h customer-service window has closed.
     reminderTemplate: process.env.WA_REMINDER_TEMPLATE ?? "",
-    reminderTemplateLang: env("WA_REMINDER_TEMPLATE_LANG", "en"),
+    // Language code of the approved templates.
+    templateLang: env("WA_TEMPLATE_LANG", env("WA_REMINDER_TEMPLATE_LANG", "en")),
+    // Approved utility template "{{1}}"-style, for purchase-order updates outside the 24h window.
+    updateTemplate: process.env.WA_UPDATE_TEMPLATE ?? "",
+    // Approved template with Approve / Reject quick-reply buttons, for approval requests outside the window.
+    approvalTemplate: process.env.WA_APPROVAL_TEMPLATE ?? "",
   },
 };

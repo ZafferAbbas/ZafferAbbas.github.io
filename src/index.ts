@@ -1,12 +1,17 @@
 import { pino } from "pino";
-import { createBackend, respond } from "./agent.js";
+import { createBackend } from "./agent.js";
 import { config } from "./config.js";
 import { Store } from "./db.js";
-import { TransientLlmError } from "./llm/types.js";
+import { OdooConnector } from "./erp/odoo.js";
+import type { ErpConnector } from "./erp/types.js";
+import { WebhookConnector } from "./erp/webhook.js";
+import { createHandler } from "./handler.js";
+import { PurchaseOrderService } from "./po/service.js";
 import { startScheduler } from "./scheduler.js";
+import { SpeechToText } from "./stt.js";
 import { BaileysTransport } from "./transports/baileys.js";
 import { CloudTransport } from "./transports/cloud.js";
-import type { IncomingMessage, Transport } from "./transports/types.js";
+import type { Transport } from "./transports/types.js";
 
 const log = pino({ level: process.env.LOG_LEVEL ?? "info" });
 const store = new Store(config.dataDir);
@@ -22,6 +27,34 @@ const transport: Transport =
         log,
       });
 
+// ERP connectors for approved purchase orders.
+const odoo = config.odoo.url ? new OdooConnector(config.odoo) : null;
+const connectors: ErpConnector[] = [];
+if (odoo) connectors.push(odoo);
+if (config.customErp.url) connectors.push(new WebhookConnector(config.customErp));
+
+const purchaseOrders = new PurchaseOrderService(
+  store,
+  transport,
+  connectors,
+  odoo,
+  { ...config.purchaseOrders, timezone: config.timezone, allowSelfApproval: process.env.PO_ALLOW_SELF_APPROVAL === "true" },
+  log,
+);
+if (!purchaseOrders.enabled) log.info("Purchase orders are off: set MANAGER_NUMBERS to turn them on");
+else if (connectors.length === 0) log.warn("Purchase orders are on, but no ERP is set up (ODOO_URL / CUSTOM_ERP_URL)");
+
+const stt = config.speechToText.url ? new SpeechToText(config.speechToText) : null;
+const { allowed, handle } = createHandler({
+  store,
+  transport,
+  backend,
+  purchaseOrders: purchaseOrders.enabled ? purchaseOrders : null,
+  stt,
+  allowedNumbers: config.allowedNumbers,
+  log,
+});
+
 // One turn at a time per chat, so replies stay in order and history stays consistent.
 const queues = new Map<string, Promise<void>>();
 function enqueue(chatId: string, job: () => Promise<void>): void {
@@ -32,44 +65,33 @@ function enqueue(chatId: string, job: () => Promise<void>): void {
   queues.set(chatId, next);
 }
 
-function allowed(msg: IncomingMessage): boolean {
-  if (msg.isGroup || config.allowedNumbers.length === 0) return true;
-  const digits = msg.senderId.split("@")[0].replace(/\D/g, "");
-  return config.allowedNumbers.includes(digits);
-}
-
-async function handle(msg: IncomingMessage): Promise<void> {
-  const text = msg.text.trim();
-  if (text.toLowerCase() === "/reset") {
-    store.clearHistory(msg.chatId);
-    await transport.send(msg.chatId, "Conversation context cleared. Saved notes and reminders are kept.");
-    return;
-  }
-
-  const typing = transport instanceof BaileysTransport ? transport : undefined;
-  await typing?.setTyping(msg.chatId, true);
-  try {
-    const reply = await respond(backend, msg, store, transport.reminderWarning?.bind(transport));
-    await transport.send(msg.chatId, reply);
-  } catch (err) {
-    log.error({ err, chat: msg.chatId }, "failed to respond");
-    const busy = err instanceof TransientLlmError;
-    await transport
-      .send(msg.chatId, busy ? "I'm a bit overloaded right now, please try again in a minute." : "Sorry, something went wrong on my side.")
-      .catch(() => {});
-  } finally {
-    await typing?.setTyping(msg.chatId, false);
-  }
-}
+const typing = transport instanceof BaileysTransport ? transport : undefined;
 
 await transport.start((msg) => {
   if (!msg.addressedToBot || !allowed(msg)) return;
   // Ignore backlog delivered on reconnect.
   if (Date.now() - msg.timestamp > 10 * 60_000) return;
-  log.info({ chat: msg.chatId, from: msg.senderName, group: msg.isGroup }, "message");
-  enqueue(msg.chatId, () => handle(msg));
+  log.info({ chat: msg.chatId, from: msg.senderName, group: msg.isGroup, media: msg.media?.kind, action: msg.action }, "message");
+  enqueue(msg.chatId, async () => {
+    await typing?.setTyping(msg.chatId, true);
+    try {
+      await handle(msg);
+    } finally {
+      await typing?.setTyping(msg.chatId, false);
+    }
+  });
 });
 
 startScheduler(store, transport, log);
 setInterval(() => store.pruneHistory(config.historyTurns * 2), 3600_000).unref();
-log.info({ transport: transport.name, llm: backend.name, timezone: config.timezone }, `${config.botName} is running`);
+log.info(
+  {
+    transport: transport.name,
+    llm: backend.name,
+    timezone: config.timezone,
+    purchaseOrders: purchaseOrders.enabled,
+    erp: connectors.map((c) => c.name),
+    voiceNotes: !!stt,
+  },
+  `${config.botName} is running`,
+);

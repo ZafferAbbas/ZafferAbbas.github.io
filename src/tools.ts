@@ -12,7 +12,7 @@ export interface ToolSpec<S extends z.ZodObject = z.ZodObject> {
   run: (input: z.infer<S>) => Promise<string>;
 }
 
-function tool<S extends z.ZodObject>(t: ToolSpec<S>): ToolSpec {
+export function tool<S extends z.ZodObject>(t: ToolSpec<S>): ToolSpec {
   return t as unknown as ToolSpec;
 }
 
@@ -28,14 +28,28 @@ Rules:
 - Before cancelling or deleting, look it up to get the right id. If several match, ask which.
 - In groups, each message says who sent it.
 - This is WhatsApp: keep replies short. Use only WhatsApp formatting (*bold*, _italic_, "- " lists). No markdown headings or tables.
-- You can answer simple questions briefly, but you have no internet access.`;
+- You can answer simple questions briefly, but you have no internet access.
+
+Purchase orders (only if you have the purchase-order tools; otherwise say purchase orders aren't available to this person):
+- Staff ask you to create purchase orders by text, by voice note (you get the transcript), or by sending a photo or PDF of a handwritten or printed order. Read the supplier and every item: description, quantity, unit and unit price if shown.
+- If you have find_suppliers / find_products, match the supplier and each item to the ERP with them and use the returned refs. Never invent refs. If an item has several plausible matches or none, ask the person which one, listing the options briefly.
+- Before calling create_purchase_order, show the person a short summary (supplier, items with quantities and prices) and ask them to confirm, unless they already clearly confirmed. After creating it, tell them the PO number and that it was sent to the managers for approval.
+- If you can't read part of a photo, say which part and ask, rather than guessing quantities or prices.
+- When someone asks for a picture, copy or PDF of a purchase order, call send_purchase_order_pdf.
+- Managers can approve or reject purchase orders by tapping the buttons, or by asking you ("approve PO-00012", "reject PO-00012, too expensive").`;
 
 /** Returns a warning if a reminder for this chat at `dueAt` might not be deliverable, else null. */
 export type ReminderWarning = (chatId: string, dueAt: number) => string | null;
 
-export function buildTools(msg: IncomingMessage, store: Store, reminderWarning?: ReminderWarning): ToolSpec[] {
+export function buildTools(
+  msg: IncomingMessage,
+  store: Store,
+  reminderWarning?: ReminderWarning,
+  extra: ToolSpec[] = [],
+): ToolSpec[] {
   const tz = config.timezone;
   return [
+    ...extra,
     tool({
       name: "save_note",
       description: "Save a note to this chat's memory. Use for anything a user asks you to remember or keep.",

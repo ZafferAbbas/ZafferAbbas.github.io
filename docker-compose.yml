@@ -1,8 +1,11 @@
-# Runs the bot, a local Ollama model server and an HTTPS front end (Caddy) on one VPS.
-#   cp .env.example .env        (set DOMAIN, TIMEZONE, BOT_NAME, OLLAMA_MODEL and the WA_* values)
+# Runs the bot, an HTTPS front end (Caddy) and a speech-to-text server for voice notes on one VPS.
+#   cp .env.example .env        (set DOMAIN, the WA_* values, ANTHROPIC_API_KEY, MANAGER_NUMBERS, ODOO_*)
 #   docker compose up -d
 #   docker compose logs -f bot
 # Point DOMAIN's DNS (an A record) at the VPS first: Caddy gets a free HTTPS certificate for it automatically.
+#
+# Using a local model instead of Claude? Set LLM_PROVIDER=ollama and start with:
+#   docker compose --profile ollama up -d
 services:
   caddy:
     image: caddy:2
@@ -16,7 +19,32 @@ services:
     depends_on:
       - bot
 
+  # Whisper speech-to-text for voice notes (OpenAI-compatible API). Downloads its model on first use.
+  stt:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    restart: unless-stopped
+    volumes:
+      - stt:/home/ubuntu/.cache/huggingface
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      STT_URL: http://stt:8000
+      PORT: "3000"
+    volumes:
+      - data:/data
+    depends_on:
+      stt:
+        condition: service_started
+      ollama-pull:
+        condition: service_completed_successfully
+        required: false
+
   ollama:
+    profiles: [ollama]
     image: ollama/ollama:latest
     restart: unless-stopped
     volumes:
@@ -28,6 +56,7 @@ services:
 
   # Downloads the model once (a few GB), then exits.
   ollama-pull:
+    profiles: [ollama]
     image: ollama/ollama:latest
     env_file: .env
     environment:
@@ -37,21 +66,8 @@ services:
       ollama:
         condition: service_healthy
 
-  bot:
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      LLM_PROVIDER: ollama
-      OLLAMA_URL: http://ollama:11434
-      PORT: "3000"
-    volumes:
-      - data:/data
-    depends_on:
-      ollama-pull:
-        condition: service_completed_successfully
-
 volumes:
   caddy:
+  stt:
   ollama:
   data:

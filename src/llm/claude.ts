@@ -2,17 +2,27 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { config } from "../config.js";
 import type { ToolSpec } from "../tools.js";
-import { TransientLlmError, type ChatTurn, type LlmBackend } from "./types.js";
+import { TransientLlmError, type ChatTurn, type LlmBackend, type UserTurn } from "./types.js";
 
 /** Optional hosted backend (paid, per message). Used when LLM_PROVIDER=claude. */
 export class ClaudeBackend implements LlmBackend {
   readonly name = "claude";
+  readonly readsAttachments = true;
   private client = new Anthropic();
 
-  async run(system: string, history: ChatTurn[], userText: string, tools: ToolSpec[]): Promise<string> {
+  async run(system: string, history: ChatTurn[], user: UserTurn, tools: ToolSpec[]): Promise<string> {
+    const content: Anthropic.Beta.BetaContentBlockParam[] = user.attachments.map((a) =>
+      a.kind === "pdf"
+        ? { type: "document" as const, source: { type: "base64" as const, media_type: "application/pdf" as const, data: a.data } }
+        : {
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: a.mediaType as "image/jpeg" | "image/png" | "image/gif" | "image/webp", data: a.data },
+          },
+    );
+    content.push({ type: "text", text: user.text });
     const messages: Anthropic.Beta.BetaMessageParam[] = [
       ...history.map((h) => ({ role: h.role, content: h.content })),
-      { role: "user", content: userText },
+      { role: "user", content },
     ];
     let final: Anthropic.Beta.BetaMessage;
     try {

@@ -37,7 +37,9 @@ function transport(store: Store, graphBaseUrl: string, reminderTemplate = "") {
     appSecret: "s",
     graphVersion: "v23.0",
     reminderTemplate,
-    reminderTemplateLang: "en",
+    updateTemplate: "",
+    approvalTemplate: "",
+    templateLang: "en",
     store,
     log: pino({ level: "silent" }),
     graphBaseUrl,
@@ -50,7 +52,7 @@ test("cloud: inside the 24h window a reminder goes out as plain text", async () 
   const g = await fakeGraph();
   const store = new Store("", ":memory:");
   store.touchInbound("92300", Date.now() - HOUR);
-  await transport(store, g.url, "reminder").send("92300", "⏰ *Reminder*\nCall Ali", { reminderText: "Call Ali" });
+  await transport(store, g.url, "reminder").send("92300", "⏰ *Reminder*\nCall Ali", { notice: { kind: "reminder", text: "Call Ali" } });
   g.close();
   assert.equal(g.sent.length, 1);
   assert.equal(g.sent[0].type, "text");
@@ -60,7 +62,7 @@ test("cloud: outside the window it uses the template, with a variable that has n
   const g = await fakeGraph();
   const store = new Store("", ":memory:");
   store.touchInbound("92300", Date.now() - 30 * HOUR);
-  await transport(store, g.url, "reminder").send("92300", "⏰ *Reminder*\nCall Ali", { reminderText: "Call Ali\nabout\tthe   invoice" });
+  await transport(store, g.url, "reminder").send("92300", "⏰ *Reminder*\nCall Ali", { notice: { kind: "reminder", text: "Call Ali\nabout\tthe   invoice" } });
   g.close();
   assert.equal(g.sent[0].type, "template");
   assert.equal(g.sent[0].template.name, "reminder");
@@ -71,7 +73,7 @@ test("cloud: outside the window with no template, the reminder is undeliverable"
   const g = await fakeGraph();
   const store = new Store("", ":memory:");
   const t = transport(store, g.url);
-  await assert.rejects(t.send("92300", "x", { reminderText: "x" }), UndeliverableError);
+  await assert.rejects(t.send("92300", "x", { notice: { kind: "reminder", text: "x" } }), UndeliverableError);
   g.close();
   assert.equal(g.sent.length, 0);
 });
@@ -80,7 +82,7 @@ test("cloud: if Meta says the window is closed, it falls back to the template", 
   const g = await fakeGraph(131047);
   const store = new Store("", ":memory:");
   store.touchInbound("92300", Date.now() - HOUR);
-  await transport(store, g.url, "reminder").send("92300", "x", { reminderText: "Call Ali" });
+  await transport(store, g.url, "reminder").send("92300", "x", { notice: { kind: "reminder", text: "Call Ali" } });
   g.close();
   assert.deepEqual(
     g.sent.map((m) => m.type),

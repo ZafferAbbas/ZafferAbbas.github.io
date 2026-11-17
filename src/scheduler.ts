@@ -24,7 +24,7 @@ export function startScheduler(store: Store, transport: Transport, log: Logger):
         let text = `⏰ *Reminder*${tag ? ` for ${tag}` : ""}\n${r.text}`;
         if (lateMin >= 10) text += `\n_(this was due ${lateMin} min ago)_`;
         try {
-          await transport.send(r.chat_id, text, { mentions: [r.created_by], reminderText: r.text });
+          await transport.send(r.chat_id, text, { mentions: [r.created_by], notice: { kind: "reminder", text: r.text } });
           store.completeReminder(r.id, next);
           failures.delete(r.id);
           log.info({ reminder: r.id, chat: r.chat_id }, "reminder sent");

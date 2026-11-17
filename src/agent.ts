@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import type { Store } from "./db.js";
-import type { LlmBackend } from "./llm/types.js";
-import { buildTools, SYSTEM_PROMPT, type ReminderWarning } from "./tools.js";
+import type { Attachment, LlmBackend } from "./llm/types.js";
+import { buildTools, SYSTEM_PROMPT, type ReminderWarning, type ToolSpec } from "./tools.js";
 import type { IncomingMessage } from "./transports/types.js";
 
 export async function createBackend(): Promise<LlmBackend> {
@@ -13,7 +13,19 @@ export async function createBackend(): Promise<LlmBackend> {
   return new OllamaBackend();
 }
 
-function userTurnText(msg: IncomingMessage): string {
+export interface TurnOptions {
+  reminderWarning?: ReminderWarning;
+  /** Extra tools for this sender (e.g. purchase orders). */
+  extraTools?: ToolSpec[];
+  /** Photos or PDFs to show the model. */
+  attachments?: Attachment[];
+  /** Replaces msg.text, e.g. with a voice note's transcript. */
+  text?: string;
+  /** What the user sent, for the transcript, e.g. "photo" or "voice note". */
+  sent?: string;
+}
+
+function userTurnText(msg: IncomingMessage, text: string, sent?: string): string {
   const now = new Date();
   const local = new Intl.DateTimeFormat("en-CA", {
     timeZone: config.timezone,
@@ -30,22 +42,19 @@ function userTurnText(msg: IncomingMessage): string {
     `[Chat: ${msg.isGroup ? "group" : "direct message"}]`,
     `[From: ${msg.senderName || "unknown"}]`,
   ];
+  if (sent) header.push(`[Sent: ${sent}]`);
   if (msg.quotedText) header.push(`[Replying to: "${msg.quotedText.slice(0, 500)}"]`);
-  return `${header.join(" ")}\n${msg.text}`;
+  return `${header.join(" ")}\n${text}`;
 }
 
 /** Runs one turn for an incoming message and returns the reply text. */
-export async function respond(
-  backend: LlmBackend,
-  msg: IncomingMessage,
-  store: Store,
-  reminderWarning?: ReminderWarning,
-): Promise<string> {
+export async function respond(backend: LlmBackend, msg: IncomingMessage, store: Store, opts: TurnOptions = {}): Promise<string> {
   const history = store.recentHistory(msg.chatId, config.historyTurns * 2);
   while (history.length && history[0].role !== "user") history.shift();
 
-  const userText = userTurnText(msg);
-  const reply = (await backend.run(SYSTEM_PROMPT, history, userText, buildTools(msg, store, reminderWarning))) || "Done.";
+  const userText = userTurnText(msg, opts.text ?? msg.text, opts.sent);
+  const tools = buildTools(msg, store, opts.reminderWarning, opts.extraTools);
+  const reply = (await backend.run(SYSTEM_PROMPT, history, { text: userText, attachments: opts.attachments ?? [] }, tools)) || "Done.";
 
   // Only plain text is stored, so history replays cleanly on any backend.
   store.addHistory(msg.chatId, "user", userText);

@@ -1,5 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   useMultiFileAuthState,
@@ -8,7 +9,9 @@ import makeWASocket, {
 } from "baileys";
 import type { Logger } from "pino";
 import qrcode from "qrcode-terminal";
-import type { IncomingMessage, OutgoingOptions, Transport } from "./types.js";
+import type { ActionButton, IncomingMedia, IncomingMessage, OutgoingOptions, Transport } from "./types.js";
+
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 
 export interface BaileysOptions {
   authDir: string;
@@ -27,6 +30,8 @@ export class BaileysTransport implements Transport {
   private sock?: WASocket;
   private onMessage?: (msg: IncomingMessage) => void;
   private sentIds = new Set<string>();
+  /** WhatsApp may identify people by an anonymous "LID"; remember the phone number seen alongside it. */
+  private lidToPhone = new Map<string, string>();
 
   constructor(private opts: BaileysOptions) {}
 
@@ -75,12 +80,9 @@ export class BaileysTransport implements Transport {
     sock.ev.on("messages.upsert", ({ messages, type }) => {
       if (type !== "notify") return;
       for (const m of messages) {
-        try {
-          const parsed = this.parse(m);
-          if (parsed) this.onMessage?.(parsed);
-        } catch (err) {
-          log.error({ err }, "failed to parse message");
-        }
+        this.parse(m)
+          .then((parsed) => parsed && this.onMessage?.(parsed))
+          .catch((err) => log.error({ err }, "failed to parse message"));
       }
     });
   }
@@ -93,7 +95,7 @@ export class BaileysTransport implements Transport {
     return ids;
   }
 
-  private parse(m: WAMessage): IncomingMessage | null {
+  private async parse(m: WAMessage): Promise<IncomingMessage | null> {
     if (!m.message || m.key.fromMe) return null;
     const chatId = m.key.remoteJid;
     if (!chatId || chatId === "status@broadcast" || chatId.endsWith("@newsletter")) return null;
@@ -106,7 +108,14 @@ export class BaileysTransport implements Transport {
       msg.videoMessage?.caption ??
       msg.documentMessage?.caption ??
       "";
-    if (!text.trim()) return null;
+    const mediaKind: IncomingMedia["kind"] | null = msg.imageMessage
+      ? "image"
+      : msg.audioMessage
+        ? "audio"
+        : msg.documentMessage
+          ? "document"
+          : null;
+    if (!text.trim() && !mediaKind) return null;
 
     const ctxInfo =
       msg.extendedTextMessage?.contextInfo ??
@@ -116,6 +125,8 @@ export class BaileysTransport implements Transport {
 
     const isGroup = chatId.endsWith("@g.us");
     const senderId = jidNormalizedUser(isGroup ? (m.key.participant ?? "") : chatId);
+    const alt = isGroup ? m.key.participantAlt : m.key.remoteJidAlt;
+    if (alt?.endsWith("@s.whatsapp.net")) this.lidToPhone.set(senderId, alt.split("@")[0]);
     const me = this.botIds();
     const mentioned = (ctxInfo?.mentionedJid ?? []).some((j) => me.has(jidNormalizedUser(j)));
     const repliedToBot =
@@ -128,13 +139,29 @@ export class BaileysTransport implements Transport {
     const quoted = ctxInfo?.quotedMessage;
     const quotedText = quoted?.conversation ?? quoted?.extendedTextMessage?.text ?? quoted?.imageMessage?.caption ?? undefined;
 
+    const addressedToBot = !isGroup || mentioned || repliedToBot || triggered;
+    let media: IncomingMedia | undefined;
+    if (mediaKind && addressedToBot) {
+      const inner = msg.imageMessage ?? msg.audioMessage ?? msg.documentMessage!;
+      if (Number(inner.fileLength ?? 0) <= MAX_MEDIA_BYTES) {
+        const data = await downloadMediaMessage(m, "buffer", {});
+        media = {
+          kind: mediaKind,
+          mimeType: (inner.mimetype ?? "application/octet-stream").split(";")[0].trim(),
+          data,
+          filename: msg.documentMessage?.fileName ?? undefined,
+        };
+      }
+    }
+
     return {
       chatId,
       isGroup,
       senderId,
       senderName: m.pushName ?? senderId.split("@")[0],
       text,
-      addressedToBot: !isGroup || mentioned || repliedToBot || triggered,
+      media,
+      addressedToBot,
       quotedText: quotedText ?? undefined,
       timestamp: Number(m.messageTimestamp ?? 0) * 1000 || Date.now(),
     };
@@ -142,6 +169,25 @@ export class BaileysTransport implements Transport {
 
   mentionTag(userId: string): string {
     return `@${userId.split("@")[0]}`;
+  }
+
+  chatIdForNumber(digits: string): string {
+    return `${digits}@s.whatsapp.net`;
+  }
+
+  numberOf(senderId: string): string | null {
+    if (senderId.endsWith("@s.whatsapp.net")) return senderId.split("@")[0];
+    return this.lidToPhone.get(senderId) ?? null;
+  }
+
+  async sendDocument(chatId: string, data: Buffer, filename: string, caption?: string): Promise<void> {
+    if (!this.sock) throw new Error("WhatsApp socket not connected");
+    await this.sock.sendMessage(chatId, { document: data, mimetype: "application/pdf", fileName: filename, caption });
+  }
+
+  /** Linked devices can't send buttons, so people reply with a typed command instead. */
+  async sendButtons(chatId: string, _text: string, _buttons: ActionButton[], fallbackText: string): Promise<void> {
+    await this.send(chatId, fallbackText);
   }
 
   async send(chatId: string, text: string, opts?: OutgoingOptions): Promise<void> {

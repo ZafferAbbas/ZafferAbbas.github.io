@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { config } from "../config.js";
 import type { ToolSpec } from "../tools.js";
-import { TransientLlmError, type ChatTurn, type LlmBackend } from "./types.js";
+import { TransientLlmError, type ChatTurn, type LlmBackend, type UserTurn } from "./types.js";
 
 interface OllamaToolCall {
   function: { name: string; arguments: Record<string, unknown> | string };
@@ -12,17 +12,21 @@ interface OllamaMessage {
   content: string;
   tool_calls?: OllamaToolCall[];
   tool_name?: string;
+  images?: string[];
 }
 
 /** Self-hosted open model through Ollama's native /api/chat endpoint. No API key, no per-message cost. */
 export class OllamaBackend implements LlmBackend {
   readonly name = "ollama";
+  /** Only with a vision model (e.g. qwen2.5vl); PDFs aren't supported. */
+  readonly readsAttachments = false;
 
-  async run(system: string, history: ChatTurn[], userText: string, tools: ToolSpec[]): Promise<string> {
+  async run(system: string, history: ChatTurn[], user: UserTurn, tools: ToolSpec[]): Promise<string> {
+    const images = user.attachments.filter((a) => a.kind === "image").map((a) => a.data);
     const messages: OllamaMessage[] = [
       { role: "system", content: system },
       ...history.map((h) => ({ role: h.role, content: h.content })),
-      { role: "user", content: userText },
+      { role: "user", content: user.text, ...(images.length ? { images } : {}) },
     ];
     const toolDefs = tools.map((t) => {
       const { $schema: _ignored, ...parameters } = z.toJSONSchema(t.schema) as Record<string, unknown>;

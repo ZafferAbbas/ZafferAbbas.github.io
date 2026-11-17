@@ -1,13 +1,24 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage as HttpRequest } from "node:http";
+import { createServer, type IncomingMessage as HttpRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Logger } from "pino";
 import type { Store } from "../db.js";
-import { UndeliverableError, type IncomingMessage, type OutgoingOptions, type Transport } from "./types.js";
+import {
+  UndeliverableError,
+  type ActionButton,
+  type IncomingMedia,
+  type IncomingMessage,
+  type Notice,
+  type OutgoingOptions,
+  type Transport,
+} from "./types.js";
 
 /** Meta only allows free-form messages within 24h of the user's last message. Keep a small safety margin. */
 const WINDOW_MS = 24 * 3600_000 - 10 * 60_000;
 /** Graph API error code for "outside the 24-hour window, use a template". */
 const RE_ENGAGEMENT_ERROR = 131047;
+/** Largest incoming media file the bot downloads. */
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 
 export interface CloudOptions {
   port: number;
@@ -16,12 +27,38 @@ export interface CloudOptions {
   phoneNumberId: string;
   appSecret: string;
   graphVersion: string;
+  /** Approved template with one body variable, for reminders outside the 24h window. */
   reminderTemplate: string;
-  reminderTemplateLang: string;
+  /** Approved template with one body variable, for purchase-order updates outside the 24h window. */
+  updateTemplate: string;
+  /** Approved template with one body variable and two quick-reply buttons (approve, reject). */
+  approvalTemplate: string;
+  templateLang: string;
   store: Store;
   log: Logger;
   /** Graph API base URL. Only changed in tests. */
   graphBaseUrl?: string;
+}
+
+interface WebhookMedia {
+  id: string;
+  mime_type?: string;
+  caption?: string;
+  filename?: string;
+}
+
+interface WebhookMessage {
+  id: string;
+  from: string;
+  timestamp: string;
+  type: string;
+  text?: { body: string };
+  image?: WebhookMedia;
+  audio?: WebhookMedia;
+  document?: WebhookMedia;
+  interactive?: { type: string; button_reply?: { id: string; title: string } };
+  button?: { payload?: string; text?: string };
+  context?: { id?: string; from?: string };
 }
 
 interface WebhookBody {
@@ -29,15 +66,7 @@ interface WebhookBody {
     changes?: {
       value?: {
         contacts?: { wa_id: string; profile?: { name?: string } }[];
-        messages?: {
-          id: string;
-          from: string;
-          timestamp: string;
-          type: string;
-          text?: { body: string };
-          image?: { caption?: string };
-          context?: { id?: string; from?: string };
-        }[];
+        messages?: WebhookMessage[];
       };
     }[];
   }[];
@@ -46,10 +75,11 @@ interface WebhookBody {
 /**
  * Official Meta WhatsApp Business Cloud API. Direct messages only: a Cloud API number cannot be added to
  * ordinary WhatsApp groups. Free-form messages are only allowed within 24h of the user's last message;
- * outside that window reminders need an approved template (WA_REMINDER_TEMPLATE).
+ * outside that window the bot can only send approved templates.
  */
 export class CloudTransport implements Transport {
   readonly name = "cloud";
+  private server?: Server;
 
   constructor(private opts: CloudOptions) {
     for (const k of ["verifyToken", "accessToken", "phoneNumberId"] as const) {
@@ -59,6 +89,10 @@ export class CloudTransport implements Transport {
     if (!opts.reminderTemplate) {
       opts.log.warn("WA_REMINDER_TEMPLATE not set: reminders due more than 24h after someone's last message can't be delivered");
     }
+  }
+
+  private get graph(): string {
+    return `${this.opts.graphBaseUrl ?? "https://graph.facebook.com"}/${this.opts.graphVersion}`;
   }
 
   async start(onMessage: (msg: IncomingMessage) => void): Promise<void> {
@@ -74,11 +108,17 @@ export class CloudTransport implements Transport {
       }
       if (req.method !== "POST") return void res.writeHead(405).end();
 
-      const raw = await readBody(req);
+      let raw: Buffer;
+      try {
+        raw = await readBody(req);
+      } catch {
+        return void res.writeHead(413).end();
+      }
       if (this.opts.appSecret && !this.validSignature(raw, req.headers["x-hub-signature-256"])) {
         log.warn("rejected webhook with bad signature");
         return void res.writeHead(401).end();
       }
+      // Answer Meta straight away; downloading media and replying happen afterwards.
       res.writeHead(200).end();
 
       let body: WebhookBody;
@@ -91,25 +131,70 @@ export class CloudTransport implements Transport {
         for (const change of entry.changes ?? []) {
           const v = change.value;
           for (const m of v?.messages ?? []) {
-            const text = m.text?.body ?? m.image?.caption ?? "";
-            if (!text.trim()) continue;
-            this.opts.store.touchInbound(m.from, Number(m.timestamp) * 1000 || Date.now());
-            const name = v?.contacts?.find((c) => c.wa_id === m.from)?.profile?.name ?? m.from;
-            onMessage({
-              chatId: m.from,
-              isGroup: false,
-              senderId: m.from,
-              senderName: name,
-              text,
-              addressedToBot: true,
-              timestamp: Number(m.timestamp) * 1000 || Date.now(),
-            });
+            try {
+              const msg = await this.parse(m, v?.contacts?.find((c) => c.wa_id === m.from)?.profile?.name);
+              if (msg) onMessage(msg);
+            } catch (err) {
+              log.error({ err, type: m.type }, "failed to read incoming message");
+            }
           }
         }
       }
     });
+    this.server = server;
     await new Promise<void>((resolve) => server.listen(this.opts.port, resolve));
-    log.info(`Cloud API webhook listening on :${this.opts.port}/webhook`);
+    log.info(`Cloud API webhook listening on :${this.port}/webhook`);
+  }
+
+  /** The port the webhook server listens on. */
+  get port(): number {
+    return (this.server?.address() as AddressInfo | null)?.port ?? this.opts.port;
+  }
+
+  stop(): void {
+    this.server?.close();
+  }
+
+  private async parse(m: WebhookMessage, profileName: string | undefined): Promise<IncomingMessage | null> {
+    const timestamp = Number(m.timestamp) * 1000 || Date.now();
+    this.opts.store.touchInbound(m.from, timestamp);
+    const base = { chatId: m.from, isGroup: false, senderId: m.from, senderName: profileName ?? m.from, addressedToBot: true, timestamp };
+
+    switch (m.type) {
+      case "text":
+        return m.text?.body.trim() ? { ...base, text: m.text.body } : null;
+      case "interactive": {
+        const reply = m.interactive?.button_reply;
+        return reply ? { ...base, text: reply.title, action: reply.id } : null;
+      }
+      case "button":
+        // A quick-reply button on a template message.
+        return m.button?.payload ? { ...base, text: m.button.text ?? "", action: m.button.payload } : null;
+      case "image":
+      case "audio":
+      case "document": {
+        const meta = m[m.type]!;
+        const media = await this.downloadMedia(m.type, meta);
+        return { ...base, text: meta.caption ?? "", media };
+      }
+      default:
+        this.opts.log.info({ type: m.type }, "ignoring unsupported message type");
+        return null;
+    }
+  }
+
+  private async downloadMedia(kind: IncomingMedia["kind"], meta: WebhookMedia): Promise<IncomingMedia> {
+    const auth = { Authorization: `Bearer ${this.opts.accessToken}` };
+    const infoRes = await fetch(`${this.graph}/${meta.id}`, { headers: auth });
+    if (!infoRes.ok) throw new Error(`media lookup failed: ${infoRes.status} ${await infoRes.text()}`);
+    const info = (await infoRes.json()) as { url: string; mime_type?: string; file_size?: number };
+    if ((info.file_size ?? 0) > MAX_MEDIA_BYTES) throw new Error(`media too large (${info.file_size} bytes)`);
+    const fileRes = await fetch(info.url, { headers: auth });
+    if (!fileRes.ok) throw new Error(`media download failed: ${fileRes.status}`);
+    const data = Buffer.from(await fileRes.arrayBuffer());
+    if (data.length > MAX_MEDIA_BYTES) throw new Error(`media too large (${data.length} bytes)`);
+    const mimeType = (meta.mime_type ?? info.mime_type ?? "application/octet-stream").split(";")[0].trim();
+    return { kind, mimeType, data, filename: meta.filename };
   }
 
   private validSignature(raw: Buffer, header: string | string[] | undefined): boolean {
@@ -123,6 +208,14 @@ export class CloudTransport implements Transport {
     return "";
   }
 
+  chatIdForNumber(digits: string): string {
+    return digits;
+  }
+
+  numberOf(senderId: string): string | null {
+    return senderId.replace(/\D/g, "") || null;
+  }
+
   private windowOpenAt(chatId: string, at: number): boolean {
     const last = this.opts.store.lastInbound(chatId);
     return last !== null && at - last < WINDOW_MS;
@@ -134,41 +227,96 @@ export class CloudTransport implements Transport {
   }
 
   async send(chatId: string, text: string, opts?: OutgoingOptions): Promise<void> {
-    const reminderText = opts?.reminderText;
-    if (reminderText !== undefined && !this.windowOpenAt(chatId, Date.now())) {
-      return this.sendReminderTemplate(chatId, reminderText);
-    }
+    const notice = opts?.notice;
+    if (notice && !this.windowOpenAt(chatId, Date.now())) return this.sendNoticeTemplate(chatId, notice);
     try {
       await this.post({ messaging_product: "whatsapp", to: chatId, type: "text", text: { body: text, preview_url: false } });
     } catch (err) {
       // Our record of the window can be off (e.g. messages sent before this bot was set up); Meta's answer wins.
-      if (reminderText !== undefined && err instanceof GraphError && err.code === RE_ENGAGEMENT_ERROR) {
-        return this.sendReminderTemplate(chatId, reminderText);
-      }
+      if (notice && err instanceof GraphError && err.code === RE_ENGAGEMENT_ERROR) return this.sendNoticeTemplate(chatId, notice);
       throw err;
     }
   }
 
-  private async sendReminderTemplate(chatId: string, reminderText: string): Promise<void> {
-    if (!this.opts.reminderTemplate) {
-      throw new UndeliverableError("24-hour window closed and WA_REMINDER_TEMPLATE is not set");
+  async sendDocument(chatId: string, data: Buffer, filename: string, caption?: string): Promise<void> {
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", "application/pdf");
+    form.append("file", new Blob([new Uint8Array(data)], { type: "application/pdf" }), filename);
+    const res = await fetch(`${this.graph}/${this.opts.phoneNumberId}/media`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.opts.accessToken}` },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`media upload failed: ${res.status} ${await res.text()}`);
+    const { id } = (await res.json()) as { id: string };
+    await this.post({ messaging_product: "whatsapp", to: chatId, type: "document", document: { id, filename, caption } });
+  }
+
+  async sendButtons(chatId: string, text: string, buttons: ActionButton[], fallbackText: string, notice?: Notice): Promise<void> {
+    if (this.windowOpenAt(chatId, Date.now())) {
+      try {
+        await this.post({
+          messaging_product: "whatsapp",
+          to: chatId,
+          type: "interactive",
+          interactive: {
+            type: "button",
+            body: { text: text.slice(0, 1024) },
+            action: { buttons: buttons.slice(0, 3).map((b) => ({ type: "reply", reply: { id: b.id, title: b.title.slice(0, 20) } })) },
+          },
+        });
+        return;
+      } catch (err) {
+        if (!(err instanceof GraphError && err.code === RE_ENGAGEMENT_ERROR)) throw err;
+      }
     }
-    // Template variables may not contain newlines, tabs or more than 4 spaces in a row.
-    const param = reminderText.replace(/\s+/g, " ").trim().slice(0, 1000) || "Reminder";
+    if (!notice) throw new UndeliverableError("24-hour window closed");
+    if (this.opts.approvalTemplate && buttons.length === 2) {
+      // The template defines two quick-reply buttons; their payloads are set per message.
+      await this.post({
+        messaging_product: "whatsapp",
+        to: chatId,
+        type: "template",
+        template: {
+          name: this.opts.approvalTemplate,
+          language: { code: this.opts.templateLang },
+          components: [
+            { type: "body", parameters: [{ type: "text", text: templateParam(notice.text) }] },
+            ...buttons.map((b, i) => ({
+              type: "button",
+              sub_type: "quick_reply",
+              index: String(i),
+              parameters: [{ type: "payload", payload: b.id }],
+            })),
+          ],
+        },
+      });
+      return;
+    }
+    await this.sendNoticeTemplate(chatId, notice);
+  }
+
+  private async sendNoticeTemplate(chatId: string, notice: Notice): Promise<void> {
+    const name = notice.kind === "reminder" ? this.opts.reminderTemplate : this.opts.updateTemplate;
+    if (!name) {
+      const variable = notice.kind === "reminder" ? "WA_REMINDER_TEMPLATE" : "WA_UPDATE_TEMPLATE";
+      throw new UndeliverableError(`24-hour window closed and ${variable} is not set`);
+    }
     await this.post({
       messaging_product: "whatsapp",
       to: chatId,
       type: "template",
       template: {
-        name: this.opts.reminderTemplate,
-        language: { code: this.opts.reminderTemplateLang },
-        components: [{ type: "body", parameters: [{ type: "text", text: param }] }],
+        name,
+        language: { code: this.opts.templateLang },
+        components: [{ type: "body", parameters: [{ type: "text", text: templateParam(notice.text) }] }],
       },
     });
   }
 
   private async post(payload: unknown): Promise<void> {
-    const res = await fetch(`${this.opts.graphBaseUrl ?? "https://graph.facebook.com"}/${this.opts.graphVersion}/${this.opts.phoneNumberId}/messages`, {
+    const res = await fetch(`${this.graph}/${this.opts.phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.opts.accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -184,6 +332,11 @@ export class CloudTransport implements Transport {
       throw new GraphError(`Cloud API send failed: ${res.status} ${body}`, code);
     }
   }
+}
+
+/** Template variables may not contain newlines, tabs or more than 4 spaces in a row. */
+function templateParam(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 1000) || "-";
 }
 
 class GraphError extends Error {

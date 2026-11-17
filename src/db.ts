@@ -25,6 +25,40 @@ export interface Reminder {
   created_at: number;
 }
 
+export type PoStatus = "pending" | "approved" | "rejected" | "cancelled" | "synced" | "sync_failed";
+
+export interface PoItem {
+  description: string;
+  quantity: number;
+  unit: string;
+  /** Null = let the ERP use its own price (e.g. the supplier's price list). */
+  unit_price: number | null;
+  /** Odoo product.product id, when matched. */
+  product_ref: string | null;
+  product_code: string | null;
+}
+
+export interface PurchaseOrder {
+  id: number;
+  number: string;
+  chat_id: string;
+  requester_id: string;
+  requester_name: string;
+  supplier_name: string;
+  /** Odoo res.partner id, when matched. */
+  supplier_ref: string | null;
+  notes: string;
+  status: PoStatus;
+  created_at: number;
+  decided_by: string | null;
+  decided_at: number | null;
+  reject_reason: string | null;
+  /** JSON object: connector name -> reference in that system (e.g. {"odoo": "P00042"}). */
+  erp_refs: string;
+  sync_error: string | null;
+  items: PoItem[];
+}
+
 export interface HistoryRow {
   role: "user" | "assistant";
   content: string;
@@ -68,6 +102,36 @@ export class Store {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS history_chat ON history(chat_id, id);
+      CREATE TABLE IF NOT EXISTS purchase_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        number TEXT NOT NULL DEFAULT '',
+        chat_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        requester_name TEXT NOT NULL DEFAULT '',
+        supplier_name TEXT NOT NULL,
+        supplier_ref TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_by TEXT,
+        decided_at INTEGER,
+        reject_reason TEXT,
+        erp_refs TEXT NOT NULL DEFAULT '{}',
+        sync_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS po_status ON purchase_orders(status, created_at);
+      CREATE TABLE IF NOT EXISTS po_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+        position INTEGER NOT NULL,
+        description TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        unit TEXT NOT NULL DEFAULT '',
+        unit_price REAL,
+        product_ref TEXT,
+        product_code TEXT
+      );
+      CREATE INDEX IF NOT EXISTS po_items_po ON po_items(po_id, position);
       CREATE TABLE IF NOT EXISTS chat_activity (
         chat_id TEXT PRIMARY KEY,
         last_inbound_at INTEGER NOT NULL
@@ -156,6 +220,93 @@ export class Store {
          )`,
       )
       .run(keepPerChat);
+  }
+
+  // ---- purchase orders ----
+  createPurchaseOrder(
+    po: Pick<PurchaseOrder, "chat_id" | "requester_id" | "requester_name" | "supplier_name" | "supplier_ref" | "notes" | "items">,
+    numberPrefix: string,
+  ): PurchaseOrder {
+    const created_at = Date.now();
+    this.db.exec("BEGIN");
+    try {
+      const r = this.db
+        .prepare(
+          "INSERT INTO purchase_orders (chat_id, requester_id, requester_name, supplier_name, supplier_ref, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(po.chat_id, po.requester_id, po.requester_name, po.supplier_name, po.supplier_ref, po.notes, created_at);
+      const id = Number(r.lastInsertRowid);
+      this.db.prepare("UPDATE purchase_orders SET number = ? WHERE id = ?").run(`${numberPrefix}${String(id).padStart(5, "0")}`, id);
+      const insertItem = this.db.prepare(
+        "INSERT INTO po_items (po_id, position, description, quantity, unit, unit_price, product_ref, product_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      po.items.forEach((it, i) =>
+        insertItem.run(id, i, it.description, it.quantity, it.unit, it.unit_price, it.product_ref, it.product_code),
+      );
+      this.db.exec("COMMIT");
+      return this.getPurchaseOrder(id)!;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  getPurchaseOrder(id: number): PurchaseOrder | null {
+    const row = this.db.prepare("SELECT * FROM purchase_orders WHERE id = ?").get(id) as unknown as
+      | Omit<PurchaseOrder, "items">
+      | undefined;
+    if (!row) return null;
+    const items = this.db
+      .prepare("SELECT description, quantity, unit, unit_price, product_ref, product_code FROM po_items WHERE po_id = ? ORDER BY position")
+      .all(id) as unknown as PoItem[];
+    return { ...row, items };
+  }
+
+  /** Finds a purchase order by its number ("PO-00012", "12", "po12"). */
+  findPurchaseOrder(ref: string): PurchaseOrder | null {
+    const exact = this.db.prepare("SELECT id FROM purchase_orders WHERE upper(number) = upper(?)").get(ref.trim()) as
+      | { id: number }
+      | undefined;
+    if (exact) return this.getPurchaseOrder(exact.id);
+    const digits = ref.replace(/\D/g, "");
+    return digits ? this.getPurchaseOrder(Number(digits)) : null;
+  }
+
+  listPurchaseOrders(filter: { requesterId?: string; status?: PoStatus[]; limit?: number }): PurchaseOrder[] {
+    let sql = "SELECT id FROM purchase_orders WHERE 1 = 1";
+    const params: (string | number)[] = [];
+    if (filter.requesterId) {
+      sql += " AND requester_id = ?";
+      params.push(filter.requesterId);
+    }
+    if (filter.status?.length) {
+      sql += ` AND status IN (${filter.status.map(() => "?").join(",")})`;
+      params.push(...filter.status);
+    }
+    sql += " ORDER BY created_at DESC LIMIT ?";
+    params.push(filter.limit ?? 20);
+    const rows = this.db.prepare(sql).all(...params) as unknown as { id: number }[];
+    return rows.map((r) => this.getPurchaseOrder(r.id)!);
+  }
+
+  /**
+   * Moves a purchase order from one of `from` to `to`. Returns false if it was not in one of those states,
+   * so two managers tapping Approve at once only approve it once.
+   */
+  transitionPurchaseOrder(
+    id: number,
+    from: PoStatus[],
+    to: PoStatus,
+    fields: Partial<Pick<PurchaseOrder, "decided_by" | "decided_at" | "reject_reason" | "erp_refs" | "sync_error">> = {},
+  ): boolean {
+    const sets = ["status = ?"];
+    const params: (string | number | null)[] = [to];
+    for (const [k, v] of Object.entries(fields)) {
+      sets.push(`${k} = ?`);
+      params.push(v as string | number | null);
+    }
+    const sql = `UPDATE purchase_orders SET ${sets.join(", ")} WHERE id = ? AND status IN (${from.map(() => "?").join(",")})`;
+    return this.db.prepare(sql).run(...params, id, ...from).changes > 0;
   }
 
   // ---- last message from each chat (for the Cloud API's 24-hour window) ----
