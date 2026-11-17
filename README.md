@@ -113,7 +113,19 @@ Your ERP should check the signature, save the order, and answer `2xx`, optionall
 
 ### Voice notes
 
-`docker compose` runs a Whisper speech-to-text server ([speaches](https://github.com/speaches-ai/speaches)) next to the bot. It downloads its model (`STT_MODEL`, ~500 MB) on the first voice note, so that one is slow. It understands English, Urdu and many other languages; set `STT_LANGUAGE` if detection gets it wrong. Claude can't listen to audio itself, which is why this runs separately.
+Claude can't listen to audio, so `docker compose` runs a Whisper speech-to-text server ([speaches](https://github.com/speaches-ai/speaches)) next to the bot. Voice notes are turned into text there, on your own server, then handled like a typed message.
+
+- **Model:** `large-v3-turbo` by default (`STT_MODEL`). It's much better at Urdu and Farsi than the small Whisper models, needs about 2–3 GB of RAM, and downloads (~1.6 GB) on the first voice note, so that one is slow.
+- **Languages:** detected automatically. Farsi works well, Urdu fairly well, Sindhi poorly (Whisper has very little Sindhi training data); English and mixed Urdu-English are fine. To force one language for everyone, set `STT_LANGUAGE`, e.g. `ur`.
+- **Urdu heard as Hindi:** spoken Urdu and Hindi sound almost the same, so Whisper often picks Hindi and writes Devanagari script. When that happens the bot transcribes the note again as Urdu (`STT_LANGUAGE_REMAP=hi:ur`; set it to `none` to turn this off).
+- A wrong transcript usually isn't fatal: Claude reads the transcript, asks about anything unclear, and matches items against Odoo before creating a purchase order.
+
+## Languages
+
+- **Replies:** in the language the person uses. Anyone using Urdu, whether in Urdu script, Roman Urdu or Hindi script (which voice typing often produces), gets replies in **Roman Urdu**. To use one language for everyone, set `REPLY_LANGUAGE`, e.g. `English` or `Roman Urdu`.
+- **PDFs:** Urdu, Sindhi, Farsi and Arabic print correctly, right to left, using the bundled Noto Naskh Arabic font ([`assets/fonts`](assets/fonts), SIL Open Font License). Numbers and English words inside them keep their left-to-right order.
+- **Purchase-order items** use the product and supplier names from Odoo, so orders stay consistent whatever language staff speak.
+- A few fixed messages (like "Sorry, I can only read photos and PDF files") are in English.
 
 ## Choosing the AI model
 
@@ -191,7 +203,7 @@ You need a VPS with Docker, a domain or subdomain (for HTTPS), and a phone numbe
    docker compose logs -f bot
    ```
 
-   [`docker-compose.yml`](docker-compose.yml) starts Caddy (which gets a free HTTPS certificate for `DOMAIN`), the Whisper speech-to-text server, and the bot. 4 GB of RAM is enough.
+   [`docker-compose.yml`](docker-compose.yml) starts Caddy (which gets a free HTTPS certificate for `DOMAIN`), the Whisper speech-to-text server, and the bot. A VPS with **8 GB of RAM** is comfortable (4 GB works if you switch `STT_MODEL` to a smaller model, at the cost of worse Urdu).
 
 ### 3. Connect the webhook
 
@@ -218,6 +230,8 @@ All settings are environment variables; see [`.env.example`](.env.example). The 
 | `ODOO_URL`, `ODOO_DB`, `ODOO_API_KEY`, `ODOO_API` | | See [Odoo](#odoo) |
 | `CUSTOM_ERP_URL`, `CUSTOM_ERP_SECRET` | | See [Custom ERP](#custom-erp) |
 | `BOT_NAME` | `Assistant` | Name the bot uses for itself |
+| `REPLY_LANGUAGE` | (person's own; Roman Urdu for Urdu) | Force one reply language |
+| `STT_LANGUAGE`, `STT_LANGUAGE_REMAP` | auto, `hi:ur` | Voice-note language; see [Voice notes](#voice-notes) |
 | `TIMEZONE` | system zone | IANA zone for reading and sending reminder times, e.g. `Asia/Karachi` |
 | `DOMAIN` | | Domain for HTTPS; the webhook is `https://DOMAIN/webhook` |
 | `WA_REMINDER_TEMPLATE`, `WA_UPDATE_TEMPLATE`, `WA_APPROVAL_TEMPLATE` | | Approved templates for messages outside the 24-hour window |

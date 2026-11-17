@@ -8,7 +8,7 @@ import { WebhookConnector } from "./erp/webhook.js";
 import { createHandler } from "./handler.js";
 import { PurchaseOrderService } from "./po/service.js";
 import { startScheduler } from "./scheduler.js";
-import { SpeechToText } from "./stt.js";
+import { parseRemap, SpeechToText } from "./stt.js";
 import { BaileysTransport } from "./transports/baileys.js";
 import { CloudTransport } from "./transports/cloud.js";
 import type { Transport } from "./transports/types.js";
@@ -44,7 +44,9 @@ const purchaseOrders = new PurchaseOrderService(
 if (!purchaseOrders.enabled) log.info("Purchase orders are off: set MANAGER_NUMBERS to turn them on");
 else if (connectors.length === 0) log.warn("Purchase orders are on, but no ERP is set up (ODOO_URL / CUSTOM_ERP_URL)");
 
-const stt = config.speechToText.url ? new SpeechToText(config.speechToText) : null;
+const stt = config.speechToText.url
+  ? new SpeechToText({ ...config.speechToText, remap: parseRemap(config.speechToText.remap) })
+  : null;
 const { allowed, handle } = createHandler({
   store,
   transport,

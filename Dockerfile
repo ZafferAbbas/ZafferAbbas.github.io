@@ -11,6 +11,7 @@ WORKDIR /app
 ENV NODE_ENV=production DATA_DIR=/data BAILEYS_AUTH_DIR=/data/baileys-auth
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 COPY package.json ./
 VOLUME /data
 CMD ["node", "--disable-warning=ExperimentalWarning", "dist/index.js"]

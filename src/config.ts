@@ -29,6 +29,9 @@ if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
 
 export const config = {
   botName: env("BOT_NAME", "Assistant"),
+  // Language the bot always replies in, e.g. "Roman Urdu" or "English". Empty = the person's own language,
+  // with Roman Urdu for anyone writing or speaking Urdu.
+  replyLanguage: process.env.REPLY_LANGUAGE ?? "",
   timezone: env("TIMEZONE", Intl.DateTimeFormat().resolvedOptions().timeZone),
   dataDir: env("DATA_DIR", "./data"),
   provider: provider as "ollama" | "claude",
@@ -82,9 +85,12 @@ export const config = {
   speechToText: {
     // OpenAI-compatible transcription server (e.g. the speaches container in docker-compose.yml).
     url: (process.env.STT_URL ?? "").replace(/\/$/, ""),
-    model: env("STT_MODEL", "Systran/faster-whisper-small"),
-    // Optional language hint, e.g. "en" or "ur". Empty = detect automatically.
+    // large-v3-turbo handles Urdu and Farsi far better than the small models. Needs ~2-3 GB RAM.
+    model: env("STT_MODEL", "deepdml/faster-whisper-large-v3-turbo-ct2"),
+    // Force one language, e.g. "ur". Empty = detect automatically.
     language: process.env.STT_LANGUAGE ?? "",
+    // Re-transcribe in another language when this one is detected. "hi:ur" = Hindi heard -> write Urdu.
+    remap: env("STT_LANGUAGE_REMAP", "hi:ur"),
   },
   transport: transport as "baileys" | "cloud",
   baileys: {

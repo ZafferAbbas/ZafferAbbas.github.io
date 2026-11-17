@@ -19,7 +19,8 @@ services:
     depends_on:
       - bot
 
-  # Whisper speech-to-text for voice notes (OpenAI-compatible API). Downloads its model on first use.
+  # Whisper speech-to-text for voice notes (OpenAI-compatible API). Downloads its model (~1.6 GB) on first use.
+  # The default model (large-v3-turbo) needs about 2-3 GB of RAM.
   stt:
     image: ghcr.io/speaches-ai/speaches:latest-cpu
     restart: unless-stopped

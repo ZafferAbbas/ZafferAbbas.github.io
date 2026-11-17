@@ -53,10 +53,12 @@ export function createHandler(deps: HandlerDeps) {
       if (m?.kind === "audio") {
         if (!stt?.enabled) return void (await transport.send(msg.chatId, "Sorry, I can't listen to voice notes yet. Please type it instead."));
         const transcript = await stt.transcribe(m.data, m.mimeType);
-        if (!transcript) return void (await transport.send(msg.chatId, "I couldn't make out that voice note. Could you try again or type it?"));
-        log.info({ chat: msg.chatId, chars: transcript.length }, "voice note transcribed");
-        turnText = transcript;
-        sent = "voice note (this is its transcript; spellings of names and products may be off)";
+        if (!transcript.text) {
+          return void (await transport.send(msg.chatId, "I couldn't make out that voice note. Could you try again or type it?"));
+        }
+        log.info({ chat: msg.chatId, chars: transcript.text.length, language: transcript.language }, "voice note transcribed");
+        turnText = transcript.text;
+        sent = `voice note${transcript.language ? `, language: ${transcript.language}` : ""} (this is its transcript; spellings of names and products may be off)`;
       } else if (m) {
         const kind = m.kind === "image" && IMAGE_TYPES.has(m.mimeType) ? "image" : m.mimeType === "application/pdf" ? "pdf" : null;
         if (!kind) return void (await transport.send(msg.chatId, "Sorry, I can only read photos and PDF files."));
