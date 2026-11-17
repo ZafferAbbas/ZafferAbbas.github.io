@@ -2,11 +2,11 @@
 
 An AI assistant for a WhatsApp Business number, using Meta's official WhatsApp Business Cloud API. Staff message it directly to:
 
-- **Create purchase orders** by text, voice note, or a photo or PDF of a handwritten or printed order. Managers approve them on WhatsApp, and approved orders go into **Odoo** and your **custom ERP**.
+- **Create purchase orders** by text, or a photo or PDF of a handwritten or printed order. Managers approve them on WhatsApp, and approved orders go into **Odoo** and your **custom ERP**.
 - **Get a copy** of any purchase order as a PDF.
 - **Store** notes and **set reminders**, one-off or recurring.
 
-Claude reads text, photos and PDFs. Voice notes are transcribed on your own server by Whisper (free), then handled like text.
+Claude reads text, photos and PDFs. Voice notes are **off by default** (they need an extra speech-to-text server); see [Voice notes](#voice-notes-optional).
 
 ```
 Ali:  [photo of a handwritten list] PO for Al-Noor please
@@ -36,10 +36,7 @@ Bot:  ⏰ *Reminder*
 ## How it works
 
 ```
-WhatsApp ──► Cloud API webhook ──► voice note? ──► Whisper (speech-to-text)
-                                        │
-                                        ▼
-                         per-chat queue ──► Claude + tools ──► reply
+WhatsApp ──► Cloud API webhook ──► per-chat queue ──► Claude + tools ──► reply
                                                  │
                           SQLite: purchase orders, notes, reminders
                                                  │
@@ -64,7 +61,7 @@ WhatsApp ──► Cloud API webhook ──► voice note? ──► Whisper (sp
 
 **The flow**
 
-1. Staff send a request: text, a **voice note**, or a **photo** or **PDF** of an order. The bot reads the supplier and items, looks them up in Odoo (`find_suppliers`, `find_products`), asks about anything unclear, shows a summary and asks them to confirm.
+1. Staff send a request: text, or a **photo** or **PDF** of an order (or a voice note, if [turned on](#voice-notes-optional)). The bot reads the supplier and items, looks them up in Odoo (`find_suppliers`, `find_products`), asks about anything unclear, shows a summary and asks them to confirm.
 2. It creates the purchase order (`PO-00012`, status *pending*) and sends every manager the summary with **Approve** and **Reject** buttons. A manager doesn't approve their own orders unless `PO_ALLOW_SELF_APPROVAL=true`.
 3. The first manager to tap decides. Managers can also type "reject PO-00012, too expensive" to give a reason.
 4. On approval, the order is created in **Odoo** (as a purchase order, confirmed unless `ODOO_CONFIRM=false`) and sent to your **custom ERP**. The requester is told, with the Odoo and ERP references.
@@ -111,9 +108,11 @@ Idempotency-Key: PO-00012
 
 Your ERP should check the signature, save the order, and answer `2xx`, optionally with `{"reference": "8812"}` (shown to staff). It may receive the same order again after a retry, so use `Idempotency-Key` to ignore duplicates. Odoo is sent first, so `erp_refs.odoo` lets you link the two.
 
-### Voice notes
+### Voice notes (optional)
 
-Claude can't listen to audio, so `docker compose` runs a Whisper speech-to-text server ([speaches](https://github.com/speaches-ai/speaches)) next to the bot. Voice notes are turned into text there, on your own server, then handled like a typed message.
+Off by default. Without it, a staff member who sends a voice note is asked (in Roman Urdu and English) to type it or send a photo instead.
+
+Claude can't listen to audio, so voice notes need a Whisper speech-to-text server ([speaches](https://github.com/speaches-ai/speaches)). It runs on the same VPS, but needs about 3 GB more RAM. To turn it on: set `STT_URL=http://stt:8000` in `.env` and start with `docker compose --profile voice up -d`. Voice notes are then turned into text on your own server and handled like a typed message.
 
 - **Model:** `large-v3-turbo` by default (`STT_MODEL`). It's much better at Urdu and Farsi than the small Whisper models, needs about 2–3 GB of RAM, and downloads (~1.6 GB) on the first voice note, so that one is slow.
 - **Languages:** detected automatically. Farsi works well, Urdu fairly well, Sindhi poorly (Whisper has very little Sindhi training data); English and mixed Urdu-English are fine. To force one language for everyone, set `STT_LANGUAGE`, e.g. `ur`.
@@ -203,7 +202,7 @@ You need a VPS with Docker, a domain or subdomain (for HTTPS), and a phone numbe
    docker compose logs -f bot
    ```
 
-   [`docker-compose.yml`](docker-compose.yml) starts Caddy (which gets a free HTTPS certificate for `DOMAIN`), the Whisper speech-to-text server, and the bot. A VPS with **8 GB of RAM** is comfortable (4 GB works if you switch `STT_MODEL` to a smaller model, at the cost of worse Urdu).
+   [`docker-compose.yml`](docker-compose.yml) starts Caddy (which gets a free HTTPS certificate for `DOMAIN`) and the bot. A small VPS with **1–2 GB of RAM** is enough, since the AI runs at Anthropic (Claude API) and WhatsApp at Meta. Turning on [voice notes](#voice-notes-optional) needs about 3 GB more.
 
 ### 3. Connect the webhook
 
@@ -231,7 +230,7 @@ All settings are environment variables; see [`.env.example`](.env.example). The 
 | `CUSTOM_ERP_URL`, `CUSTOM_ERP_SECRET` | | See [Custom ERP](#custom-erp) |
 | `BOT_NAME` | `Assistant` | Name the bot uses for itself |
 | `REPLY_LANGUAGE` | (person's own; Roman Urdu for Urdu) | Force one reply language |
-| `STT_LANGUAGE`, `STT_LANGUAGE_REMAP` | auto, `hi:ur` | Voice-note language; see [Voice notes](#voice-notes) |
+| `STT_URL` | (off) | Turns on voice notes; see [Voice notes](#voice-notes-optional) |
 | `TIMEZONE` | system zone | IANA zone for reading and sending reminder times, e.g. `Asia/Karachi` |
 | `DOMAIN` | | Domain for HTTPS; the webhook is `https://DOMAIN/webhook` |
 | `WA_REMINDER_TEMPLATE`, `WA_UPDATE_TEMPLATE`, `WA_APPROVAL_TEMPLATE` | | Approved templates for messages outside the 24-hour window |
@@ -250,11 +249,11 @@ npm run dev     # needs a filled-in .env
 Code layout:
 
 - `src/index.ts`: wiring and the per-chat queue
-- `src/handler.ts`: one incoming message → reply (voice notes, photos, button taps)
+- `src/handler.ts`: one incoming message → reply (photos, PDFs, voice notes, button taps)
 - `src/agent.ts`: picks the AI backend, builds each turn
 - `src/po/`: purchase orders: `service.ts` (create, approve, sync), `tools.ts` (AI tools), `pdf.ts`
 - `src/erp/`: `odoo.ts` (JSON-2 and JSON-RPC), `webhook.ts` (custom ERP)
-- `src/stt.ts`: voice-note transcription
+- `src/stt.ts`: voice-note transcription (optional)
 - `src/tools.ts`: system prompt and the notes/reminders tools
 - `src/llm/`: `ollama.ts` (local model), `claude.ts` (optional)
 - `src/db.ts`: SQLite store

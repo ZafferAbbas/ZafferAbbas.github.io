@@ -97,7 +97,7 @@ test("handler: a voice note is transcribed and the transcript goes to the AI", a
 test("handler: a voice note without a speech-to-text server gets a polite reply", async () => {
   const s = setup();
   await s.h.handle(msg({ media: { kind: "audio", mimeType: "audio/ogg", data: Buffer.from("x") } }));
-  assert.match(s.transport.sent[0], /can't listen to voice notes/);
+  assert.match(s.transport.sent[0], /voice notes nahi sun sakta/);
   assert.equal(s.backend.turns.length, 0);
 });
 

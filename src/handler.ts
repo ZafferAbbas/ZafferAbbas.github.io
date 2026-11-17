@@ -51,7 +51,12 @@ export function createHandler(deps: HandlerDeps) {
       const attachments: Attachment[] = [];
       const m = msg.media;
       if (m?.kind === "audio") {
-        if (!stt?.enabled) return void (await transport.send(msg.chatId, "Sorry, I can't listen to voice notes yet. Please type it instead."));
+        if (!stt?.enabled) {
+          return void (await transport.send(
+            msg.chatId,
+            "Maazrat, main abhi voice notes nahi sun sakta. Please likh kar bhejein, ya order ki photo bhej dein.\n_(Sorry, I can't listen to voice notes yet. Please type it or send a photo.)_",
+          ));
+        }
         const transcript = await stt.transcribe(m.data, m.mimeType);
         if (!transcript.text) {
           return void (await transport.send(msg.chatId, "I couldn't make out that voice note. Could you try again or type it?"));
